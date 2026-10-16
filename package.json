@@ -1,0 +1,17 @@
+{
+  "name": "workbuddy-proxy-js",
+  "version": "1.0.0",
+  "description": "WorkBuddy/CodeBuddy 反代 - OpenAI 兼容接口 (Node.js)",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "express": "^4.21.0"
+  },
+  "license": "MIT"
+}

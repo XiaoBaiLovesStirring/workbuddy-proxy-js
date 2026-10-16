@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WorkBuddy Proxy v2.0 - 管理面板</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f1117; color: #e4e4e7; min-height: 100vh; }
+  .header { background: linear-gradient(135deg, #1a1d2e 0%, #161827 100%); border-bottom: 1px solid #272a3a; padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; }
+  .header h1 { font-size: 18px; font-weight: 600; background: linear-gradient(90deg, #60a5fa, #a78bfa); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .header .status { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #9ca3af; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 8px #22c55e; }
+  .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 24px; background: #1a1d2e; padding: 4px; border-radius: 10px; width: fit-content; flex-wrap: wrap; }
+  .tab { padding: 8px 20px; border-radius: 8px; cursor: pointer; font-size: 14px; color: #9ca3af; transition: all 0.2s; border: none; background: transparent; }
+  .tab:hover { color: #e4e4e7; }
+  .tab.active { background: #2563eb; color: white; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .card { background: #1a1d2e; border: 1px solid #272a3a; border-radius: 12px; padding: 20px; }
+  .card .label { font-size: 12px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+  .card .value { font-size: 28px; font-weight: 700; color: #f3f4f6; }
+  .card .sub { font-size: 12px; color: #6b7280; margin-top: 4px; }
+  .panel { background: #1a1d2e; border: 1px solid #272a3a; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+  .panel h2 { font-size: 16px; font-weight: 600; margin-bottom: 16px; color: #f3f4f6; display: flex; justify-content: space-between; align-items: center; }
+  .btn { padding: 8px 16px; border-radius: 8px; border: none; cursor: pointer; font-size: 13px; font-weight: 500; transition: all 0.2s; }
+  .btn-primary { background: #2563eb; color: white; }
+  .btn-primary:hover { background: #1d4ed8; }
+  .btn-danger { background: #dc2626; color: white; }
+  .btn-danger:hover { background: #b91c1c; }
+  .btn-secondary { background: #374151; color: #e4e4e7; }
+  .btn-secondary:hover { background: #4b5563; }
+  .btn-success { background: #16a34a; color: white; }
+  .btn-success:hover { background: #15803d; }
+  .btn-sm { padding: 4px 10px; font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 12px; text-align: left; border-bottom: 1px solid #272a3a; font-size: 13px; }
+  th { color: #9ca3af; font-weight: 500; font-size: 12px; text-transform: uppercase; }
+  tr:hover { background: rgba(255,255,255,0.02); }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; }
+  .badge-green { background: rgba(34,197,94,0.15); color: #4ade80; }
+  .badge-red { background: rgba(220,38,38,0.15); color: #f87171; }
+  .badge-blue { background: rgba(37,99,235,0.15); color: #60a5fa; }
+  .badge-gray { background: rgba(107,114,128,0.15); color: #9ca3af; }
+  .badge-yellow { background: rgba(234,179,8,0.15); color: #facc15; }
+  input, select, textarea { background: #0f1117; border: 1px solid #374151; border-radius: 8px; padding: 8px 12px; color: #e4e4e7; font-size: 13px; width: 100%; }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: #2563eb; }
+  .form-row { display: flex; gap: 12px; margin-bottom: 12px; }
+  .form-group { flex: 1; }
+  .form-group label { display: block; font-size: 12px; color: #9ca3af; margin-bottom: 4px; }
+  .hidden { display: none !important; }
+  .chat-box { background: #0f1117; border: 1px solid #272a3a; border-radius: 8px; padding: 16px; height: 300px; overflow-y: auto; margin-bottom: 12px; }
+  .chat-msg { margin-bottom: 12px; }
+  .chat-msg .role { font-size: 11px; color: #6b7280; margin-bottom: 4px; }
+  .chat-msg .content { font-size: 13px; line-height: 1.6; white-space: pre-wrap; }
+  .chat-msg.user .content { color: #93c5fd; }
+  .chat-msg.assistant .content { color: #e4e4e7; }
+  .mono { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; }
+  .toast { position: fixed; top: 20px; right: 20px; padding: 12px 20px; border-radius: 8px; font-size: 13px; z-index: 1000; animation: slideIn 0.3s; }
+  .toast-success { background: #16a34a; color: white; }
+  .toast-error { background: #dc2626; color: white; }
+  @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+  .config-item { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #272a3a; }
+  .config-item:last-child { border-bottom: none; }
+  .config-item .key { color: #9ca3af; font-size: 13px; }
+  .config-item .val { color: #e4e4e7; font-size: 13px; font-family: monospace; }
+  .sanitize-test { background: #0f1117; border: 1px solid #272a3a; border-radius: 8px; padding: 12px; margin-top: 12px; font-size: 12px; max-height: 200px; overflow-y: auto; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>⚡ WorkBuddy Proxy v2.0</h1>
+  <div class="status"><span class="status-dot"></span><span id="serverStatus">运行中</span></div>
+</div>
+
+<div class="container">
+  <div class="tabs">
+    <button class="tab active" onclick="switchTab('overview',this)">概览</button>
+    <button class="tab" onclick="switchTab('accounts',this)">账号管理</button>
+    <button class="tab" onclick="switchTab('models',this)">模型列表</button>
+    <button class="tab" onclick="switchTab('test',this)">快速测试</button>
+    <button class="tab" onclick="switchTab('settings',this)">设置</button>
+  </div>
+
+  <!-- 概览 -->
+  <div id="tab-overview">
+    <div class="cards">
+      <div class="card"><div class="label">总请求</div><div class="value" id="statTotal">0</div></div>
+      <div class="card"><div class="label">成功</div><div class="value" id="statSuccess" style="color:#4ade80">0</div></div>
+      <div class="card"><div class="label">失败</div><div class="value" id="statFail" style="color:#f87171">0</div></div>
+      <div class="card"><div class="label">已清洗提示词</div><div class="value" id="statSanitized" style="color:#facc15">0</div></div>
+      <div class="card"><div class="label">账号数</div><div class="value" id="statAccounts">0</div></div>
+      <div class="card"><div class="label">运行时长</div><div class="value" id="statUptime" style="font-size:20px">0s</div></div>
+    </div>
+    <div class="panel">
+      <h2>API 接入信息</h2>
+      <table>
+        <tr><td style="width:120px;color:#9ca3af">Base URL</td><td class="mono" id="apiBase">http://127.0.0.1:8788/v1</td></tr>
+        <tr><td style="color:#9ca3af">API Key</td><td class="mono">无需填写（本地免验证）</td></tr>
+        <tr><td style="color:#9ca3af">Chat</td><td class="mono">POST /v1/chat/completions</td></tr>
+        <tr><td style="color:#9ca3af">Models</td><td class="mono">GET /v1/models</td></tr>
+        <tr><td style="color:#9ca3af">提示词清洗</td><td><span class="badge badge-green">已启用</span> 自动移除 OpenCode/Claude Code/Codex 等 Agent 注入</td></tr>
+        <tr><td style="color:#9ca3af">保活</td><td><span class="badge badge-green">已启用</span> 定时刷新 token、查询额度</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <!-- 账号管理 -->
+  <div id="tab-accounts" class="hidden">
+    <div class="panel">
+      <h2>添加账号 <span style="font-size:12px;color:#6b7280;font-weight:normal">支持手动粘贴或官方格式文件导入</span></h2>
+      <div class="form-row">
+        <div class="form-group"><label>UID</label><input id="newUid" placeholder="账号 UID"></div>
+        <div class="form-group"><label>Access Token</label><input id="newToken" placeholder="Bearer Token"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>区域</label>
+          <select id="newRealm"><option value="intl">国际版 (workbuddy.ai)</option><option value="cn">国内版 (copilot.tencent.com)</option></select>
+        </div>
+        <div class="form-group"><label>昵称（可选）</label><input id="newNickname" placeholder="我的账号"></div>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-primary" onclick="addAccount()">添加账号</button>
+        <button class="btn btn-secondary" onclick="rescanApiDir()">扫描 API 目录导入</button>
+      </div>
+      <p style="font-size:12px;color:#6b7280;margin-top:8px">
+        提示：将官方导出的 .json 账号文件放到 <span class="mono">~/.config/workbuddyaip/API/</span> 目录，点击"扫描 API 目录导入"即可自动识别。
+      </p>
+    </div>
+    <div class="panel">
+      <h2>账号列表</h2>
+      <table id="accountsTable">
+        <thead><tr><th>昵称</th><th>UID</th><th>区域</th><th>健康</th><th>状态</th><th>成功/失败</th><th>操作</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- 模型列表 -->
+  <div id="tab-models" class="hidden">
+    <div class="panel">
+      <h2>模型列表
+        <button class="btn btn-secondary btn-sm" onclick="refreshModels()">刷新模型</button>
+      </h2>
+      <table id="modelsTable">
+        <thead><tr><th>ID</th><th>名称</th><th>上下文</th><th>输出</th><th>积分</th><th>能力</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- 快速测试 -->
+  <div id="tab-test" class="hidden">
+    <div class="panel">
+      <h2>对话测试</h2>
+      <div class="form-row">
+        <div class="form-group"><label>模型</label><select id="testModel"></select></div>
+      </div>
+      <div class="chat-box" id="chatBox"></div>
+      <div class="form-row">
+        <div class="form-group" style="flex:3"><input id="testInput" placeholder="输入消息..." onkeydown="if(event.key==='Enter')sendTest()"></div>
+        <button class="btn btn-primary" onclick="sendTest()">发送</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 设置 -->
+  <div id="tab-settings" class="hidden">
+    <div class="panel">
+      <h2>配置信息</h2>
+      <div id="configInfo"></div>
+    </div>
+    <div class="panel">
+      <h2>保活状态
+        <button class="btn btn-secondary btn-sm" onclick="runKeepalive()">立即执行保活</button>
+      </h2>
+      <div id="keepaliveInfo"></div>
+    </div>
+    <div class="panel">
+      <h2>提示词清洗测试</h2>
+      <p style="font-size:12px;color:#9ca3af;margin-bottom:8px">输入一段包含其他 Agent 标识的 system prompt，测试清洗效果：</p>
+      <textarea id="sanitizeInput" rows="4" placeholder="例如：You are Claude Code, Anthropic's official CLI for Claude...">You are Claude Code, Anthropic's official CLI for Claude. You are running inside a terminal. Main branch (you will usually use this for PRs).</textarea>
+      <div style="margin-top:8px">
+        <button class="btn btn-primary" onclick="testSanitize()">测试清洗</button>
+      </div>
+      <div class="sanitize-test" id="sanitizeResult" style="display:none"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '';
+
+function toast(msg, type='success') {
+  const t = document.createElement('div');
+  t.className = `toast toast-${type}`;
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 3000);
+}
+
+function switchTab(name, btn) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('[id^=tab-]').forEach(t => t.classList.add('hidden'));
+  btn.classList.add('active');
+  document.getElementById('tab-' + name).classList.remove('hidden');
+  if (name === 'accounts') loadAccounts();
+  if (name === 'models') loadModels();
+  if (name === 'test') loadTestModels();
+  if (name === 'settings') { loadConfig(); loadKeepalive(); }
+}
+
+async function loadStats() {
+  try {
+    const r = await fetch('/api/stats');
+    const d = await r.json();
+    document.getElementById('statTotal').textContent = d.totalRequests;
+    document.getElementById('statSuccess').textContent = d.successRequests;
+    document.getElementById('statFail').textContent = d.failedRequests;
+    document.getElementById('statSanitized').textContent = d.sanitizedPrompts || 0;
+    document.getElementById('statAccounts').textContent = d.accounts?.length || 0;
+    const up = d.uptime || 0;
+    document.getElementById('statUptime').textContent = up > 3600 ? Math.floor(up/3600)+'h' : up > 60 ? Math.floor(up/60)+'m' : up+'s';
+  } catch(e) {}
+}
+
+async function loadAccounts() {
+  const r = await fetch('/api/accounts');
+  const accounts = await r.json();
+  const tbody = document.querySelector('#accountsTable tbody');
+  tbody.innerHTML = accounts.map(a => {
+    const healthBadge = a.healthStatus === 'healthy' ? '<span class="badge badge-green">健康</span>'
+      : a.healthStatus === 'unhealthy' ? '<span class="badge badge-red">异常</span>'
+      : '<span class="badge badge-gray">未知</span>';
+    return `<tr>
+      <td>${a.nickname || a.uid.slice(0,8)}</td>
+      <td class="mono" style="font-size:11px">${a.uid.slice(0,20)}...</td>
+      <td><span class="badge ${a.realm==='intl'?'badge-blue':'badge-green'}">${a.realm==='intl'?'国际':'国内'}</span></td>
+      <td>${healthBadge}</td>
+      <td><span class="badge ${a.enabled?'badge-green':'badge-gray'}">${a.enabled?'启用':'禁用'}</span></td>
+      <td>${a.successCount||0} / ${a.failCount||0}</td>
+      <td>
+        <button class="btn btn-sm btn-secondary" onclick="testAccount('${a.id}')">测试</button>
+        <button class="btn btn-sm ${a.enabled?'btn-danger':'btn-success'}" onclick="toggleAccount('${a.id}')">${a.enabled?'禁用':'启用'}</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteAccount('${a.id}')">删除</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+async function addAccount() {
+  const uid = document.getElementById('newUid').value.trim();
+  const accessToken = document.getElementById('newToken').value.trim();
+  const realm = document.getElementById('newRealm').value;
+  const nickname = document.getElementById('newNickname').value.trim();
+  if (!uid || !accessToken) { toast('UID 和 Token 必填', 'error'); return; }
+  const r = await fetch('/api/accounts', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ uid, accessToken, realm, nickname })
+  });
+  if (r.ok) { toast('账号添加成功'); loadAccounts();
+    document.getElementById('newUid').value=''; document.getElementById('newToken').value=''; document.getElementById('newNickname').value='';
+  } else { toast('添加失败', 'error'); }
+}
+
+async function rescanApiDir() {
+  toast('正在扫描...');
+  const r = await fetch('/api/accounts/rescan', { method: 'POST' });
+  const d = await r.json();
+  if (d.success) {
+    toast(`导入完成，共 ${d.imported} 个账号`);
+    loadAccounts();
+  } else {
+    toast('扫描失败', 'error');
+  }
+}
+
+async function deleteAccount(id) {
+  if (!confirm('确定删除此账号？')) return;
+  await fetch('/api/accounts/' + id, { method: 'DELETE' });
+  toast('已删除'); loadAccounts();
+}
+
+async function toggleAccount(id) {
+  await fetch('/api/accounts/' + id + '/toggle', { method: 'PATCH' });
+  loadAccounts();
+}
+
+async function testAccount(id) {
+  toast('测试中...');
+  const r = await fetch('/api/accounts/' + id + '/test', { method: 'POST' });
+  const d = await r.json();
+  if (d.success) toast(`连通成功，${d.modelCount} 个模型`);
+  else toast('测试失败: ' + d.error, 'error');
+}
+
+async function loadModels() {
+  const r = await fetch('/api/models');
+  const models = await r.json();
+  const tbody = document.querySelector('#modelsTable tbody');
+  tbody.innerHTML = models.map(m => `
+    <tr>
+      <td class="mono">${m.id}${m.isDefault?' <span class="badge badge-blue">默认</span>':''}</td>
+      <td>${m.name}</td>
+      <td>${m.maxInputTokens?.toLocaleString() || '-'}</td>
+      <td>${m.maxOutputTokens?.toLocaleString() || '-'}</td>
+      <td class="mono">${m.credits || '-'}</td>
+      <td>${m.supportsImages?'🖼️':''}${m.supportsToolCall?'🔧':''}${m.supportsReasoning?'🧠':''}</td>
+    </tr>
+  `).join('');
+}
+
+async function refreshModels() {
+  toast('刷新中...');
+  await fetch('/api/models/refresh', { method: 'POST' });
+  loadModels();
+  toast('已刷新');
+}
+
+async function loadTestModels() {
+  const r = await fetch('/api/models');
+  const models = await r.json();
+  const sel = document.getElementById('testModel');
+  sel.innerHTML = models.map(m => `<option value="${m.id}">${m.name} (${m.id})</option>`).join('');
+}
+
+function addChatMsg(role, content) {
+  const box = document.getElementById('chatBox');
+  const div = document.createElement('div');
+  div.className = 'chat-msg ' + role;
+  div.innerHTML = `<div class="role">${role === 'user' ? '你' : 'AI'}</div><div class="content"></div>`;
+  div.querySelector('.content').textContent = content;
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+  return div.querySelector('.content');
+}
+
+async function sendTest() {
+  const input = document.getElementById('testInput');
+  const msg = input.value.trim();
+  if (!msg) return;
+  input.value = '';
+  addChatMsg('user', msg);
+  const aiContent = addChatMsg('assistant', '思考中...');
+  try {
+    const model = document.getElementById('testModel').value;
+    const r = await fetch('/v1/chat/completions', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ model, messages: [{role:'user',content:msg}], stream: true })
+    });
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let full = '';
+    aiContent.textContent = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const text = decoder.decode(value);
+      const lines = text.split('\n');
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const data = line.slice(6).trim();
+          if (data === '[DONE]') continue;
+          try {
+            const obj = JSON.parse(data);
+            const c = obj.choices?.[0]?.delta?.content;
+            if (c) { full += c; aiContent.textContent = full; }
+          } catch(e) {}
+        }
+      }
+    }
+  } catch(e) {
+    aiContent.textContent = '错误: ' + e.message;
+  }
+}
+
+async function loadConfig() {
+  const r = await fetch('/api/config');
+  const d = await r.json();
+  document.getElementById('configInfo').innerHTML = `
+    <div class="config-item"><span class="key">配置目录</span><span class="val">${d.configDir}</span></div>
+    <div class="config-item"><span class="key">账号目录 (API)</span><span class="val">${d.apiDir}</span></div>
+    <div class="config-item"><span class="key">日志目录</span><span class="val">${d.logDir}</span></div>
+    <div class="config-item"><span class="key">监听地址</span><span class="val">${d.host}:${d.port}</span></div>
+    <div class="config-item"><span class="key">保活间隔</span><span class="val">${d.keepaliveInterval/1000} 秒</span></div>
+    <div class="config-item"><span class="key">提示词清洗</span><span class="val">${d.promptSanitize ? '已启用' : '已禁用'}</span></div>
+  `;
+}
+
+async function loadKeepalive() {
+  const r = await fetch('/api/keepalive/status');
+  const d = await r.json();
+  document.getElementById('keepaliveInfo').innerHTML = `
+    <div class="config-item"><span class="key">保活状态</span><span class="val"><span class="badge badge-green">运行中</span></span></div>
+    <div class="config-item"><span class="key">执行间隔</span><span class="val">${d.interval/1000} 秒</span></div>
+    <div class="config-item"><span class="key">功能</span><span class="val">Token 自动刷新 + 额度查询 + 健康检查</span></div>
+  `;
+}
+
+async function runKeepalive() {
+  toast('正在执行保活...');
+  await fetch('/api/keepalive/run', { method: 'POST' });
+  toast('保活执行完成');
+  loadAccounts();
+}
+
+async function testSanitize() {
+  const input = document.getElementById('sanitizeInput').value;
+  const r = await fetch('/api/sanitizer/test', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ messages: [{ role: 'system', content: input }] })
+  });
+  const d = await r.json();
+  const result = document.getElementById('sanitizeResult');
+  result.style.display = 'block';
+  if (d.sanitized) {
+    result.innerHTML = `<span style="color:#facc15">✓ 已清洗 (原因: ${d.reason})</span>\n\n清洗后:\n${d.messages[0].content}`;
+  } else {
+    result.innerHTML = `<span style="color:#9ca3af">未检测到第三方 Agent 标识，无需清洗</span>\n\n原文:\n${d.messages[0].content}`;
+  }
+}
+
+// 初始化
+loadStats();
+setInterval(loadStats, 5000);
+document.getElementById('apiBase').textContent = window.location.origin + '/v1';
+</script>
+</body>
+</html>
