@@ -6,7 +6,72 @@
 
 ---
 
-## [2.1.0] - 2026-10-17
+## [2.2.0] - 2026-10-17
+
+> 本版本修复 4 个稳定性 bug：
+> - 流式路径下「闭合标签风暴」会让孤立 `</invoke>` 泄漏给客户端
+> - 上游 error 被一律打成 `[ERROR]`，误把客户端主动断开的预期事件当成故障
+> - 流式响应中途出错时仍发 `finish_reason=stop`，客户端以为正常完成
+> - chunkId 同毫秒冲突 / 统计指标位置错误 / 请求日志写死 200
+
+### 修复
+
+- **工具调用：流式路径下的「闭合标签风暴」防御**
+  旧 `createStreamFilter.push` 只检测工具调用**起始**标记（`<tool_call>` /
+  `<invoke...>` / DSML），不检测**孤立闭合标签**。当模型在长上下文里进入
+  「自模仿」状态、反复复制历史 `</invoke>` 时，这些闭合标签被当成正文流式
+  下发到客户端，OpenCode / Claude Code 渲染成一长串空白行 + 闭合标签。
+  `parseToolCalls`（一次性解析）的 `cleanupResidual` 兜底能清掉，**但流式
+  push 已经把内容发出去了**。单元测试覆盖不足是漏测根因。
+  现新增 `countUnmatchedCloseTags(text)`，push/finish 时实时检测孤立 `</invoke>`，
+  阈值 1 即触发整段丢弃（不动 STREAM_HOLD_BACK 切片窗口，避免前 2 个泄漏），
+  finish 兜底 `cleanupResidual` 清理零散残留。新增 21 个单元测试覆盖此路径。
+
+- **proxy：区分「预期关闭」与「真上游错误」**
+  旧 `upstreamRes.on('error')` 一律打 `[ERROR]`，但 `aborted`（来自
+  `destroy()`）、`ECONNRESET`、`socket hang up` 都是**预期的 socket 关闭
+  信号**——客户端主动断开、我们主动 destroy 上游、上游正常收尾都会触发。
+  现新增 `isExpectedSocketClose(e, clientGone)` 工具函数：
+  - 客户端已断开（clientGone=true）→ 任何 error 都视为预期
+  - `aborted` / `ECONNRESET` / `socket hang up` → 预期
+  - 其余 → 真错误
+  预期关闭改打 `[INFO]`（不再是 ERROR），避免误导排查；headersSent=false 时
+  真错误回 502、预期关闭回 **499**（Client Closed Request，HTTP 标准状态码）。
+
+- **proxy：流式错误帧语义修复**
+  原 error handler 给客户端发 `finish_reason=stop + [DONE]`，客户端以为对话
+  正常完成，但实际流被腰斩——上游真崩溃时内容残缺用户却看不见告警。
+  现改发 `finish_reason=length + [DONE]`（OpenAI 规范允许的合法 finish_reason，
+  表示「异常终止 / 长度限制导致截断」），客户端可识别为异常收尾。
+  注：`streamPassthrough` 透传模式不动（上游 SSE 帧原样转发，无 finish_reason
+  帧时客户端会自然识别为中断）。
+
+- **proxy：chunkId 同毫秒冲突修复**
+  旧 `chatcmpl-${Date.now()}` 在同毫秒下会产生相同 id（OpenCode / Claude Code
+  会把相同 id 的 chunk 当成同一个响应吞掉，导致内容 / 工具调用丢失）。
+  现改为 `chatcmpl-{Date.now().36}-{chunkSeq++}-{rand}` 形式：
+  36 进制时间戳 + 进程内自增序号 + 4 字符随机后缀，全局唯一。
+
+- **proxy：successRequests 累加位置修正**
+  旧逻辑在「转发开始」时累加 `stats.successRequests++`，失败的请求也被
+  算成 success。现改为在 `await new Promise` 转发完成后根据 `upstreamOk` 判断：
+  - `onSettled(true)` → `successRequests++`
+  - `onSettled(false)` → `failedRequests++`
+  失败率统计能反映真实情况。
+
+- **proxy：请求日志写入真实状态**
+  旧 `logger.request(...200...)` 写死 200，无论上游是否真挂。
+  现根据 `upstreamOk` 写 200 或 502（仅 requests.log 文件，HTTP 给客户端的
+  200 不变——headers 已下发，回不了别的状态码）。
+
+### 新增
+
+- 工具调用 / 错误处理 / bug 修复 共 **38 个单元回归测试**：
+  - `test/toolcall_unit_test.js` — 21 个（含闭合标签风暴防御）
+  - `test/proxy_error_unit_test.js` — 9 个（isExpectedSocketClose）
+  - `test/proxy_bugfix_test.js` — 8 个（4 个新 bug 的源码级断言）
+
+---
 
 > 本版本聚焦「工具调用」与「多模态输入」的兼容性修复，是 2.0.0 之后的一次功能性修复发布。
 
@@ -134,5 +199,6 @@
 
 ---
 
+[2.2.0]: https://github.com/XiaoBaiLovesStirring/workbuddy-proxy-js/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/XiaoBaiLovesStirring/workbuddy-proxy-js/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/XiaoBaiLovesStirring/workbuddy-proxy-js/releases/tag/v2.0.0

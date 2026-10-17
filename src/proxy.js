@@ -44,10 +44,40 @@ const DOWNSTREAM_HEARTBEAT_INTERVAL = parseInt(process.env.DOWNSTREAM_HEARTBEAT_
 // 上游失败时的最大尝试次数（含首次），重试时会换一个账号
 const MAX_UPSTREAM_ATTEMPTS = parseInt(process.env.MAX_UPSTREAM_ATTEMPTS || '3', 10);
 
+// SSE chunkId 自增计数：保证同毫秒下多次响应 / 多次重试的 chunkId 不冲突。
+// 同毫秒下 Date.now() 相同，OpenCode / Claude Code 等客户端会把相同 id 的
+// chunk 当成同一个响应吞掉，导致内容/工具调用丢失。
+let chunkSeq = 0;
+
 // 值得重试的上游状态码
 //   401/403：单个账号 token 失效 —— 换账号即可继续，不该让整个任务断掉
 //   429/5xx：限流 / 网关 / 服务端临时故障
 const RETRYABLE_STATUS = new Set([401, 403, 408, 409, 425, 429, 500, 502, 503, 504, 520, 521, 522, 524]);
+
+/**
+ * 判断上游 stream error 是否是「预期的关闭」而非真实故障
+ *
+ * 这些错误码/消息在以下场景是正常的，不应当作上游故障处理：
+ *  - 客户端提前断开 → 我们主动 destroy 上游 socket → 触发 'aborted'
+ *  - 上游主动断开（finish_reason=stop 后正常关闭）→ 触发 ECONNRESET
+ *  - Node socket 在 destroy 后的尾随事件
+ *
+ * 判定为「预期」时：(1) 不打 ERROR 日志；(2) 不当成真错误处理；
+ * 区分 down/up 错误能给日志带来真正的诊断价值。
+ *
+ * @param {Error|null} e
+ * @param {boolean} clientGone - 客户端是否已经断开（res.writableEnded）
+ * @returns {boolean}
+ */
+function isExpectedSocketClose(e, clientGone) {
+  if (!e) return true;
+  // 客户端已经断开 → 上游的任何错误都是预期内的
+  if (clientGone) return true;
+  // 我们主动 destroy() 后触发的 aborted
+  if (e.code === 'ECONNRESET' || e.code === 'ERR_STREAM_PREMATURE_CLOSE') return true;
+  if (e.message === 'aborted' || e.message === 'socket hang up' || e.message === 'premature close') return true;
+  return false;
+}
 
 /**
  * 启动向下游的 SSE 心跳，返回停止函数
@@ -276,8 +306,10 @@ function extractDelta(obj) {
  */
 function handleToolCallResponse(upstreamRes, upstreamReq, res, { model, stream, startTime, account, onSettled }) {
   const filter = toolcall.createStreamFilter();
-  const modelName = model || 'default-model';
-  const chunkId = `chatcmpl-${Date.now()}`;
+  const modelName = (model || 'default-model');
+  // chunkId 用 36 进制时间戳 + 进程内自增计数 + 随机后缀，避免同毫秒下
+  // 多次重试 / 多次分块产生相同 id（OpenCode 会把相同 id 当成同一个响应 chunk 吞掉）。
+  const chunkId = `chatcmpl-${Date.now().toString(36)}-${(chunkSeq++).toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   const created = Math.floor(Date.now() / 1000);
 
   let usage = null;
@@ -333,10 +365,17 @@ function handleToolCallResponse(upstreamRes, upstreamReq, res, { model, stream, 
 
     if (typeof delta.content === 'string' && delta.content) {
       rawAcc += delta.content;
-      const { content } = filter.push(delta.content);
-      if (content) {
-        contentAcc += content;
-        if (stream) writeChunk({ content });
+      const result = filter.push(delta.content);
+      if (result.content) {
+        contentAcc += result.content;
+        if (stream) writeChunk({ content: result.content });
+      }
+      if (result.dropped) {
+        // 模型自模仿 / 递归异常：流式路径下检测到「闭合标签风暴」，
+        // 整段丢弃（不下发）。但 rawAcc 仍保留原始文本以供 DEBUG 排查。
+        logger.warn(
+          `工具调用风暴防御触发: 丢弃 ${result.droppedLen} 字符（reason=${result.reason}，账号=${account.nickname}）`,
+        );
       }
     }
   });
@@ -359,6 +398,11 @@ function handleToolCallResponse(upstreamRes, upstreamReq, res, { model, stream, 
     }
 
     const fin = filter.finish();
+    if (fin.dropped) {
+      logger.warn(
+        `工具调用风暴防御（finish）: 丢弃 ${fin.droppedLen} 字符（reason=${fin.reason}，账号=${account.nickname}）`,
+      );
+    }
     if (fin.content) {
       contentAcc += fin.content;
       if (stream) writeChunk({ content: fin.content });
@@ -430,20 +474,36 @@ function handleToolCallResponse(upstreamRes, upstreamReq, res, { model, stream, 
   upstreamRes.on('error', (e) => {
     if (ended) return;
     ended = true;
-    logger.error(`上游流错误: ${e.message}（账号=${account.nickname}）`);
+    const clientGone = res.writableEnded || res.destroyed;
+    const expected = isExpectedSocketClose(e, clientGone);
+
+    if (expected) {
+      // 客户端已断开 / 我们主动 destroy / 上游正常关闭后的尾随事件
+      // → 这些都不是真正的上游故障，不打 ERROR（避免日志噪音）
+      logger.info(`上游流关闭（预期）: ${e.message}（账号=${account.nickname}）`);
+    } else {
+      logger.error(`上游流错误: ${e.message}（账号=${account.nickname}，code=${e.code || '-'}）`);
+    }
+
     if (!res.headersSent) {
+      // 还没开始流式输出（响应头未下发）→ 客户端仍能收到 JSON 错误
+      // 但只有真正错误才回 502；预期关闭就回 499（Client Closed Request）
       finish(false);
-      res.status(502).json({ error: { message: `上游连接错误: ${e.message}` } });
+      res.status(expected ? 499 : 502).json({
+        error: { message: expected ? '客户端已断开' : `上游连接错误: ${e.message}` },
+      });
     } else if (!res.writableEnded) {
-      // 流式响应已经开始，无法重试。至少补上收尾帧 + [DONE]，
-      // 否则多数客户端会一直挂着等 [DONE] 而表现为「卡住 / 断联」。
+      // 流式响应已开始：补发结束帧 + [DONE] 让客户端能正常收尾
+      // 关键：用 finish_reason='length' 表示「异常终止」（OpenAI 规范允许的合法值），
+      // 不要再用 'stop'——客户端会以为对话正常完成，但实际上内容可能残缺。
       try {
-        writeChunk({}, upstreamFinish || 'stop');
+        writeChunk({}, 'length');
         res.write('data: [DONE]\n\n');
       } catch { /* ignore */ }
       res.end();
       finish(false);
     } else {
+      // 客户端已经断开且响应头已下发 → 不需要任何输出
       finish(false);
     }
   });
@@ -486,7 +546,13 @@ function streamPassthrough(upstreamRes, upstreamReq, res, { startTime, account, 
   });
 
   upstreamRes.on('error', (e) => {
-    logger.error(`上游流错误: ${e.message}（账号=${account.nickname}）`);
+    const clientGone = res.writableEnded || res.destroyed;
+    const expected = isExpectedSocketClose(e, clientGone);
+    if (expected) {
+      logger.info(`上游流关闭（预期）: ${e.message}（账号=${account.nickname}）`);
+    } else {
+      logger.error(`上游流错误: ${e.message}（账号=${account.nickname}，code=${e.code || '-'}）`);
+    }
     if (!res.writableEnded) {
       // 透传模式下补一个 [DONE]，避免客户端一直挂着等结束帧
       try { res.write('data: [DONE]\n\n'); } catch { /* ignore */ }
@@ -548,8 +614,19 @@ function streamAggregate(upstreamRes, upstreamReq, res, { model, account, onSett
   });
 
   upstreamRes.on('error', (e) => {
-    logger.error(`上游流错误: ${e.message}（账号=${account.nickname}）`);
-    if (!res.headersSent) res.status(502).json({ error: { message: `上游连接错误: ${e.message}` } });
+    const clientGone = res.writableEnded || res.destroyed;
+    const expected = isExpectedSocketClose(e, clientGone);
+    if (expected) {
+      logger.info(`上游流关闭（预期）: ${e.message}（账号=${account.nickname}）`);
+    } else {
+      logger.error(`上游流错误: ${e.message}（账号=${account.nickname}，code=${e.code || '-'}）`);
+    }
+    // 非流式：响应头未下发时还能回 JSON 错误；已下发则不处理
+    if (!res.headersSent) {
+      res.status(expected ? 499 : 502).json({
+        error: { message: expected ? '客户端已断开' : `上游连接错误: ${e.message}` },
+      });
+    }
     finish(false);
   });
 }
@@ -672,10 +749,15 @@ async function handleChatCompletions(req, res) {
 
     // ---- 建立成功，开始转发 ----
     accountMgr.updateAccountStats(account.id, true);
-    stats.successRequests++;
 
+    // successRequests 在转发真正完成后再累加（onSettled 里）
+    // —— 之前的实现写在「开始转发」处，导致失败的请求也被算成 success。
+    let upstreamOk = false;
     await new Promise((resolve) => {
-      const onSettled = () => resolve();
+      const onSettled = (ok) => {
+        upstreamOk = ok;
+        resolve();
+      };
       if (hasTools) {
         handleToolCallResponse(upstreamRes, upstreamReq, res, {
           model, stream, startTime, account, onSettled,
@@ -687,8 +769,20 @@ async function handleChatCompletions(req, res) {
       }
     });
 
+    if (upstreamOk) {
+      stats.successRequests++;
+    } else {
+      stats.failedRequests++;
+    }
+
     const duration = Date.now() - startTime;
-    logger.request('POST', '/v1/chat/completions', 200, duration, account.id);
+    // 请求日志写入真实状态：success → 200；error handler 走 finish(false) → 上游失败
+    // 但 HTTP 层返回给客户端的 status 是 200（headers 已下发），所以这里区分日志状态与 HTTP 状态
+    logger.request(
+      'POST', '/v1/chat/completions',
+      upstreamOk ? 200 : 502,
+      duration, account.id,
+    );
     return;
   }
 

@@ -37,6 +37,32 @@ const MAX_TOOL_CALLS = 32;
 // 流式过滤时需要在尾部保留的字符数，避免标记被 chunk 边界截断
 const STREAM_HOLD_BACK = 16;
 
+// 触发「闭合标签风暴」防御的阈值：连续多少个孤立的闭合标签
+// （找不到对应开标签的）就视为模型自模仿/递归异常，整段丢弃。
+// 真实事故中模型会一次性吐 50+ 个 </invoke>，阈值取 1 保证零泄漏。
+// （push 里只需要 textBuf 累积 1 个孤立闭合标签就触发丢弃）
+const CLOSE_TAG_STORM_THRESHOLD = 1;
+
+/**
+ * 统计文本中"找不到对应开标签的孤立闭合标签"数量
+ *
+ * 用途：检测模型自模仿/递归异常（长上下文里看到历史 tool_call 文本后
+ * 疯狂复制闭合标签 </invoke>）。这种输出对客户端毫无意义且会污染 UI。
+ *
+ * 用简单计数即可：开标签只能由"工具调用解析路径"消耗，
+ * 出现在普通文本流的闭合标签 99% 是模型自模仿。
+ */
+function countUnmatchedCloseTags(text) {
+  if (!text) return 0;
+  // 仅检测 invoke 风格的闭合（这是 OpenCode / Claude Code 的主流格式）
+  // tool_call / DSML 风格的闭合会被 findToolCallStart 触发转入 toolBuf，
+  // 不会出现在这里。
+  const re = /<\/invoke>/gi;
+  const opens = (text.match(/<invoke\b/gi) || []).length;
+  const closes = (text.match(/<\/invoke>/gi) || []).length;
+  return Math.max(0, closes - opens);
+}
+
 /**
  * 将 OpenAI tools 定义转换为文本描述（注入到 system prompt）
  */
@@ -590,7 +616,8 @@ function createStreamFilter() {
   return {
     /**
      * 推入一个增量片段
-     * @returns {{ content: string }} 本次可以立即下发的正文
+     * @returns {{ content: string, dropped: boolean }} 本次可以立即下发的正文；
+     *                                            dropped=true 表示触发了兜底丢弃
      */
     push(chunk) {
       if (!chunk) return { content: '' };
@@ -604,7 +631,19 @@ function createStreamFilter() {
       const idx = findToolCallStart(textBuf);
 
       if (idx === -1) {
-        // 未出现标记：安全吐出除尾部保留区外的内容
+        // 未出现工具调用起始标记：先检查「闭合标签风暴」
+        // —— 模型在长上下文里自模仿，会持续输出孤立 </invoke>
+        // 一旦累积到阈值就立刻整段丢弃并静默后续，
+        // 不再走 STREAM_HOLD_BACK 切窗口路径，避免前 2 个闭合标签泄漏。
+        // 注意：textBuf 长度可能 < STREAM_HOLD_BACK，所以不能依赖切片判断。
+        const unmatched = countUnmatchedCloseTags(textBuf);
+        if (unmatched >= CLOSE_TAG_STORM_THRESHOLD) {
+          const droppedLen = textBuf.length;
+          textBuf = '';
+          return { content: '', dropped: true, droppedLen, reason: 'close_tag_storm' };
+        }
+
+        // 未达阈值：安全吐出除尾部保留区外的内容
         if (textBuf.length > STREAM_HOLD_BACK) {
           const cut = textBuf.length - STREAM_HOLD_BACK;
           const out = textBuf.slice(0, cut);
@@ -614,7 +653,7 @@ function createStreamFilter() {
         return { content: '' };
       }
 
-      // 命中标记：标记前的内容立即下发，其余转入工具缓冲
+      // 命中工具调用起始标记：标记前的内容立即下发，其余转入工具缓冲
       const out = textBuf.slice(0, idx);
       toolBuf += textBuf.slice(idx);
       textBuf = '';
@@ -624,15 +663,30 @@ function createStreamFilter() {
 
     /**
      * 流结束，返回剩余正文与解析出的工具调用
-     * @returns {{ content: string, toolCalls: Array, hasToolCall: boolean }}
+     * @returns {{ content: string, toolCalls: Array, hasToolCall: boolean, dropped: boolean }}
      */
     finish() {
       if (!inTool) {
         const idx = findToolCallStart(textBuf);
         if (idx === -1) {
+          // 防御：检查闭合标签风暴
+          const storm = countUnmatchedCloseTags(textBuf);
+          if (storm >= CLOSE_TAG_STORM_THRESHOLD) {
+            const tail = textBuf;
+            textBuf = '';
+            return {
+              content: '',
+              toolCalls: [],
+              hasToolCall: false,
+              dropped: true,
+              droppedLen: tail.length,
+              reason: 'close_tag_storm',
+            };
+          }
           const tail = textBuf;
           textBuf = '';
-          return { content: tail, toolCalls: [], hasToolCall: false };
+          // 兜底清理：清掉任何零散的孤立闭合标签，避免泄漏给客户端
+          return { content: cleanupResidual(tail), toolCalls: [], hasToolCall: false };
         }
         toolBuf += textBuf.slice(idx);
         textBuf = '';
@@ -660,6 +714,7 @@ module.exports = {
   extractBalancedJson,
   createStreamFilter,
   normalizeMarkers,
+  countUnmatchedCloseTags,
   TOOL_CALL_OPEN,
   TOOL_CALL_CLOSE,
 };
